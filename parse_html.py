@@ -2,8 +2,17 @@ import sys
 import json
 import glob,os
 from bs4 import BeautifulSoup
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize, sent_tokenize
 import re
+import boto3
+import hashlib
+#import nltk
+#nltk.download()
+#nltk.download('stopwords')
+#nltk.download('punkt')
 
+stop_words = set(stopwords.words('english'))
 class EarningsCall:
     def __init__ (self):
         pass
@@ -15,11 +24,6 @@ class UpdateDetail:
 class QuestionAnswer:
     def __init__ (self):
         self.sno = 0.0
-    #def __init__ (self, questionedBy, question, answeredBy, answer):  
-    #     self.question   = question  
-    #     self.answer    = answer
-    #     self.questionedBy = questionedBy
-    #     self.answeredBy = answeredBy
 
 class Participant:
     def __init__ (self):
@@ -28,14 +32,15 @@ class Participant:
 def obj_dict(obj):
     return obj.__dict__
 
-def parseHTML(path):
+def removeStopWords(data):
+    word_tokens = word_tokenize(data)
+    filtered_sentence = [w for w in word_tokens if not w in stop_words]
+    return " ".join(filtered_sentence)
+
+def parseHTML(htmlData):
     summary = EarningsCall()
-    with open (path, "r") as myfile:
-        fileName = os.path.basename(myfile.name)
-        folderPath = os.path.dirname(myfile.name)
-        page=myfile.readlines()
-    #print(fileName)
-    soup = BeautifulSoup(str(page), 'html.parser')
+    
+    soup = BeautifulSoup(str(htmlData), 'html.parser')
     body = soup.find("div", {"id": "a-body"})
     secCompleted = False
     childElements = list(body.children)
@@ -85,7 +90,7 @@ def parseHTML(path):
                     year = next(iter(re.findall(r"[0-9]{4,4}", quarterYearInfo)), None)
             summary.company = company.strip()
             summary.exchange = exchange.strip()
-            summary.stockName = stockName.strip()
+            summary.stock = stockName.strip()
             summary.quarter = quarter
             summary.year = year
             break
@@ -142,6 +147,7 @@ def parseHTML(path):
                     updateIndex = updateIndex + 1
                 update = UpdateDetail()
                 update.by = updateBy
+                #update.detail = removeStopWords(updateDetail)
                 update.detail = updateDetail
                 update.order = updateOrder
                 updateOrder = updateOrder + 1
@@ -196,6 +202,8 @@ def parseHTML(path):
         if index==5:
             #objectQA = QA(questionedBy, question, answeredBy, answer)
             objectQA = QuestionAnswer()
+            #objectQA.question = removeStopWords(question) 
+            #objectQA.answer = removeStopWords(answer)
             objectQA.question = question  
             objectQA.answer = answer
             objectQA.questionedBy = questionedBy
@@ -208,28 +216,143 @@ def parseHTML(path):
     summary.QAList = qaSet
     summary.analysts = analysts
     summary.executies = executies
-
-    json_string = json.dumps(summary, default=obj_dict)
-    directory = folderPath + "\\JSON\\"
-    try:
-        os.stat(directory)
-    except:
-        os.mkdir(directory)
-    try:
-        os.remove(directory + fileName +".json")
-    except:
-        pass
-    
-    with open(directory + fileName +".json","w") as f:
-        f.write(json_string)
+    return summary
     
 #return json_string
 
 #Main process
 if len(sys.argv) >1:
+    stop_words.add(".")
+    stop_words.add(",")
+    stop_words.add(";")
     filePath=sys.argv[1]
+    client = boto3.client('dynamodb')
     for file in os.listdir(filePath):
         if file.endswith("-call-transcript"):
-            parseHTML(filePath+"\\" + file)
+            with open (filePath+"\\" + file, "r") as myfile:
+                fileName = os.path.basename(myfile.name)
+                folderPath = os.path.dirname(myfile.name)
+                page=myfile.readlines()
+            summary = parseHTML(page)
+            summary.id = next(iter(re.findall(r"[0-9]*", file)), None)
+            response = client.put_item(
+                Item={
+                    'id': {
+                        'N': summary.id
+                    },
+                    'company': {
+                        'S': summary.company
+                    },'exchange': {
+                        'S': summary.exchange
+                    },'stock': {
+                        'S': summary.stock
+                    },'exchange': {
+                        'S': summary.exchange
+                    },'quarter': {
+                        'S': summary.quarter
+                    },'year': {
+                        'N': summary.year
+                    }
+                },
+                ReturnConsumedCapacity='TOTAL',
+                TableName='EarninsCall',
+            )
+            for data in summary.analysts:
+                response = client.put_item(
+                    Item={
+                        'id': {
+                            'N': summary.id
+                        },
+                        'company': {
+                            'S': data.company
+                        },'name': {
+                            'S': data.name
+                        }
+                    },
+                    ReturnConsumedCapacity='TOTAL',
+                    TableName='Analysts',
+                )
+            for data in summary.executies:
+                response = client.put_item(
+                    Item={
+                        'id': {
+                            'N': summary.id
+                        },'role': {
+                            'S': data.role
+                        },'name': {
+                            'S': data.name
+                        }
+                    },
+                    ReturnConsumedCapacity='TOTAL',
+                    TableName='Executies',
+                )
+            for data in summary.QAList:
+                hashKey = hashlib.sha1(json.dumps({"Question":data.question,"Answer":data.answer}, sort_keys=True)).hexdigest()
+                response = client.put_item(
+                    Item={
+                        'id': {
+                            'N': summary.id
+                        },'key': {
+                            'S': hashKey
+                        },'questionWSW': {
+                            'S': data.question
+                        },'answerWSW': {
+                            'S': data.answer
+                        },'question': {
+                            'S': removeStopWords(data.question)
+                        },'answer': {
+                            'S': removeStopWords(data.answer)
+                        },'questionedBy': {
+                            'S': data.questionedBy
+                        },'answeredBy': {
+                            'S': data.answeredBy
+                        }
+                    },
+                    ReturnConsumedCapacity='TOTAL',
+                    TableName='QuestionAnswer',
+                )
+                response = client.put_item(
+                    Item={
+                        'id': {
+                            'N': summary.id
+                        },'key': {
+                            'S': hashKey
+                        },'questionWSW': {
+                            'S': data.question
+                        },'answerWSW': {
+                            'S': data.answer
+                        },'question': {
+                            'S': removeStopWords(data.question)
+                        },'answer': {
+                            'S': removeStopWords(data.answer)
+                        },'questionedBy': {
+                            'S': data.questionedBy
+                        },'answeredBy': {
+                            'S': data.answeredBy
+                        }
+                    },
+                    ReturnConsumedCapacity='TOTAL',
+                    TableName='QuestionAnswer',
+                )
+
+            #break
+            '''
+            directory = folderPath + "\\JSON\\"
+            try:
+                os.stat(directory)
+            except:
+                os.mkdir(directory)
+            try:
+                os.remove(directory + fileName +".json")
+            except:
+                pass
+            
+            with open(directory + fileName +".json","w") as f:
+                jsonData = json.dumps(jsonData, default=obj_dict)
+                f.write(jsonData)
+            
+            '''
+            #break
 else:
     print("Expects HTML file root location")
+
